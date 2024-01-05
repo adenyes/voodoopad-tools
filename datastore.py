@@ -180,6 +180,8 @@ class DataStore:
                 # FIXME: Raise an error that indicates the vpdoc is invalid or corrupt.
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), item_path)
 
+            # RTFD files have some non-utf characters in the header.
+
             ds.items[item_uuid] = ds.load_file(item_path).decode('utf-8')
 
         return ds
