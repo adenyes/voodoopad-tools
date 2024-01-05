@@ -82,7 +82,9 @@ class VPCache:
         # Go through the UUIDs and check if any are new or updated
         for uuid in uuids:
             item = ds.item_plist(uuid)
-            data_hash = item['dataHash']
+            data_hash = item.get('dataHash')
+            if data_hash is None:
+                continue
 
             cursor.execute('SELECT uuid, dataHash FROM items WHERE uuid = ?', (uuid,))
             row = cursor.fetchone()
