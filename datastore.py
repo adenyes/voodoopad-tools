@@ -25,10 +25,12 @@
 import errno
 import hashlib
 import os
+from io import IOBase, FileIO, BytesIO
 from pathlib import Path
 import plistlib
 import uuid as UUID
 import xml.parsers.expat
+from typing import Optional, BinaryIO, Union
 
 # Disable encryption for now
 # import vpenc
@@ -131,7 +133,7 @@ class DataStore:
             # ds.enc_ctx = vpenc.VPEncryptionContext()
             # ds.enc_ctx.load(ds.path, ds.password)
 
-        if ds.storeinfo['VoodooPadBundleVersion'] != 6:
+        if ds.storeinfo['VoodooPadBundleVersion'] != 5:
             raise Exception('Unsupported')
 
         ds.properties = ds.load_plist(properties_path)
@@ -177,6 +179,8 @@ class DataStore:
             if not item_path.exists():
                 # FIXME: Raise an error that indicates the vpdoc is invalid or corrupt.
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), item_path)
+
+            # RTFD files have some non-utf characters in the header.
 
             ds.items[item_uuid] = ds.load_file(item_path).decode('utf-8')
 
@@ -266,7 +270,12 @@ class DataStore:
         if self.encrypted:
             return self.enc_ctx.load_file(path)
         else:
-            return open(str(path), 'rb').read()
+            file_content = open(str(path), 'rb').read()
+            # check if the first 4 bytes are the RTFD magic number
+            if len(file_content) > 4 and file_content[0:4] == b'rtfd':
+                return extract_rtf_content_from_rtfd(path)
+            else:
+                return file_content
 
     def save_file(self, data, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -300,3 +309,52 @@ class DataStore:
             item = self.item_plist(uuid)
             name = tokenizer.tokenize_text(item['displayName'].lower())
             self.trie.add(name)
+
+
+def read_rtf_item(data: Union[IOBase, BinaryIO, FileIO]) -> Union[Optional[bytes], dict[str, Optional[bytes]]]:
+    item_type = read_int(data.read(4))
+    if item_type == 1:
+        # single item
+        item_size = read_int(data.read(4))
+        if item_size == 2147483648:  # 00 00 00 80 means it is a big file w padding
+            padding_size = read_int(data.read(4))
+            real_size = read_int(data.read(4))
+            data.read(padding_size)  # skip padding
+            return data.read(real_size)
+        else:
+            return data.read(item_size)
+    elif item_type == 3:
+        n_items = read_int(data.read(4))
+        item_names = []
+        directory_map = {}
+        for _ in range(n_items):
+            attr_len = read_int(data.read(4))
+            attr_name = data.read(attr_len).decode('utf-8')
+            item_names.append(attr_name)
+            directory_map[attr_name] = None
+        item_sizes = [read_int(data.read(4)) for _ in range(n_items)]
+        item_data = [data.read(size) for size in item_sizes]
+        for i, item in enumerate(item_data):
+            directory_map[item_names[i]] = read_rtf_item(BytesIO(item))
+        return directory_map
+    return None
+
+
+def read_int(four_bytes: bytes) -> int:
+    return int.from_bytes(four_bytes, byteorder='little')
+
+
+def extract_rtf_content_from_rtfd(rtfd_file_path: str) -> Optional[Union[int, bytes]]:
+    """Extracts the first RTF content from an RTFD file. """
+    with open(rtfd_file_path, 'rb') as rtfd_file:
+        if rtfd_file.read(4) != b'rtfd':
+            print("File is not an RTFD file.")
+            return None
+        rtfd_file.read(4)  # Wasn't sure what this is. Version, maybe.
+        contents = read_rtf_item(rtfd_file)
+        if isinstance(contents, dict):
+            if 'TXT.rtf' in contents:
+                return contents['TXT.rtf']
+            else:
+                print("Could not find RTF.rtf in RTFD file.")
+                return None
